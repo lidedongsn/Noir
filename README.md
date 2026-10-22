@@ -1,6 +1,37 @@
-# 墨影 Noir
+<p align="center">
+  <img src="Apps/macOS/Assets.xcassets/AppIcon.appiconset/icon_256.png" width="128" height="128" alt="墨影 Noir 图标">
+</p>
 
-面向 Apple 平台的本地视频播放器，专注于 4K HDR 高码率片源的原画质播放。
+<h1 align="center">墨影 Noir</h1>
+
+<p align="center">
+  面向 Apple 平台的极简本地视频播放器，把 4K HDR 高码率片源原样、正确地播放出来。
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/macOS-15%2B-000000?logo=apple&logoColor=white" alt="macOS 15+">
+  <img src="https://img.shields.io/badge/Swift-6-F05138?logo=swift&logoColor=white" alt="Swift 6">
+  <img src="https://img.shields.io/badge/Apple%20Silicon-M2%2B-555555" alt="Apple Silicon M2+">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License"></a>
+</p>
+
+## 特性
+
+- **原画质 HDR**：VideoToolbox 硬件解码，HDR10 / HLG 经 EDR 输出，色域、传输函数与 HDR 静态元数据完整传递
+- **无损多声道**：TrueHD、DTS-HD MA 软解为多声道 LPCM，声道位置严格对应；AC3 / E-AC3 交给系统处理
+- **字幕**：内封 PGS、SRT、ASS、Timed Text；自动加载同名外挂字幕，识别 GBK / Big5 编码，默认选择中文
+- **精确跳转**：落点精确到目标帧，音画同步
+- **极简界面**：播放时只有画面，控件按需浮现、自动隐藏；信息面板一键查看编码、动态范围与音频路径
+
+## 平台状态
+
+| 平台 | 状态 |
+|---|---|
+| macOS | 可用 |
+| tvOS | 播放内核可编译，应用规划中 |
+| iOS / iPadOS | 播放内核可编译，应用规划中 |
+
+计划中：杜比视界、HTTP 与局域网播放、Apple TV 匹配内容与功放多声道输出。
 
 ## 环境要求
 
