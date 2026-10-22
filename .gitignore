@@ -1,0 +1,30 @@
+.DS_Store
+
+# 构建产物
+.build/
+.swiftpm/
+DerivedData/
+xcuserdata/
+
+# 由 scripts/build-ffmpeg.sh 生成
+Packages/NoirKit/Frameworks/
+
+# 由 scripts/make-test-media.sh 生成
+TestMedia/
+
+# 由 xcodegen 根据 project.yml 生成
+*.xcodeproj/
+Apps/macOS/Info.plist
+Apps/macOS/Noir.entitlements
+
+# 设计稿（图标源文件、方案对照）不入库
+Design/
+
+# 与项目无关的本地文件
+.DS_Store
+.claude/
+.vscode/
+.idea/
+*.xcresult
+*.log
+.env*

@@ -1,0 +1,60 @@
+# Xcode 工程配置，执行 xcodegen generate 生成 Noir.xcodeproj
+name: Noir
+options:
+  bundleIdPrefix: dev.noir
+  deploymentTarget:
+    macOS: "15.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    DEAD_CODE_STRIPPING: YES
+packages:
+  NoirKit:
+    path: Packages/NoirKit
+targets:
+  NoirMac:
+    type: application
+    platform: macOS
+    sources:
+      - path: Apps/macOS
+    dependencies:
+      - package: NoirKit
+        product: NoirEngine
+    info:
+      path: Apps/macOS/Info.plist
+      properties:
+        CFBundleDisplayName: 墨影
+        LSApplicationCategoryType: public.app-category.entertainment
+        NSHumanReadableCopyright: "Copyright © 2026 lidedongsn. MIT License."
+        UTImportedTypeDeclarations:
+          - UTTypeIdentifier: org.matroska.mkv
+            UTTypeDescription: Matroska Video
+            UTTypeConformsTo: [public.movie]
+            UTTypeTagSpecification:
+              public.filename-extension: [mkv]
+              public.mime-type: [video/x-matroska]
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: Video
+            CFBundleTypeRole: Viewer
+            LSHandlerRank: Alternate
+            LSItemContentTypes: [org.matroska.mkv, public.mpeg-4, com.apple.quicktime-movie]
+    entitlements:
+      path: Apps/macOS/Noir.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+        com.apple.security.files.user-selected.read-only: true
+        # 保存文件夹授权，用于自动加载同名外挂字幕
+        com.apple.security.files.bookmarks.app-scope: true
+        com.apple.security.network.client: true
+    settings:
+      base:
+        PRODUCT_NAME: Noir
+        PRODUCT_BUNDLE_IDENTIFIER: dev.noir.mac
+        ENABLE_HARDENED_RUNTIME: YES
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: "-"
+        COMBINE_HIDPI_IMAGES: YES
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
