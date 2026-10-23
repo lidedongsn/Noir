@@ -6,6 +6,19 @@ struct InfoPanel: View {
     @Environment(PlayerController.self) private var player
 
     var body: some View {
+        // 内容超出可用高度时（如 iPhone 横屏）改为滚动
+        ViewThatFits(in: .vertical) {
+            content
+            ScrollView { content }
+                .scrollIndicators(.hidden)
+        }
+        .frame(width: 400, alignment: .leading)
+        .background(.black.opacity(0.72), in: .rect(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(.white.opacity(0.08)))
+        .foregroundStyle(.white)
+    }
+
+    private var content: some View {
         VStack(alignment: .leading, spacing: 12) {
             if let video = player.videoTrack {
                 Section("视频") {
@@ -45,10 +58,7 @@ struct InfoPanel: View {
             }
         }
         .padding(16)
-        .frame(width: 400, alignment: .leading)
-        .background(.black.opacity(0.72), in: .rect(cornerRadius: 10))
-        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(.white.opacity(0.08)))
-        .foregroundStyle(.white)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 生成测试片源至 TestMedia/（依赖带 libx265 与 libx264 的 ffmpeg）。
+# 生成测试片源至 TestMedia/（依赖带 libx265 与 libx264 的 ffmpeg、x265、dovi_tool 与 mkvmerge）。
 # 音频为声道识别信号：第 k 秒仅第 k 个声道有信号，频率随声道序号递增，用于校验声道映射。
 set -euo pipefail
 
@@ -126,6 +126,26 @@ ff -i "$TMP/v-sdr-hevc.mkv" -i "$TMP/a-20.wav" -i "$TMP/eng.srt" -i "$TMP/chs.as
 ff -i "$TMP/v-sdr-h264.mkv" -i "$TMP/a-20.wav" -i "$TMP/eng.srt" \
   -map 0:v -map 1:a -map 2:s -c:v copy -c:a aac -b:a 128k -c:s mov_text -metadata:s:s:0 language=eng \
   -shortest "$OUT/subs-movtext.mp4"
+
+echo "==> 生成杜比视界片源"
+# dovi_tool 生成 RPU，x265 写入码流，mkvmerge 封装并写入杜比视界配置。
+# 画面是普通测试图案，Profile 5 下会被当作 IPT 色彩显示（颜色与原图案不同），仅用于验证解码与元数据通路。
+for profile in 5 8.1; do
+  cat > "$TMP/dv-$profile.json" <<JSON
+{"cm_version": "V40", "profile": "$profile", "length": 240,
+ "level6": {"max_display_mastering_luminance": 1000, "min_display_mastering_luminance": 1,
+            "max_content_light_level": 1000, "max_frame_average_light_level": 400}}
+JSON
+  dovi_tool generate -j "$TMP/dv-$profile.json" -o "$TMP/dv-$profile.rpu" > /dev/null
+  ffmpeg -hide_banner -loglevel error -f lavfi -i "testsrc2=s=1920x1080:r=24:d=$DUR" \
+    -vf format=yuv420p10le -f yuv4mpegpipe -strict -1 - |
+    x265 --log-level error --y4m --input - --preset ultrafast --profile main10 --repeat-headers \
+      --colorprim bt2020 --transfer smpte2084 --colormatrix bt2020nc --hdr10 \
+      --master-display "G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(10000000,50)" --max-cll 1000,400 \
+      --vbv-bufsize 20000 --vbv-maxrate 20000 \
+      --dolby-vision-profile "$profile" --dolby-vision-rpu "$TMP/dv-$profile.rpu" -o "$TMP/dv-$profile.hevc"
+  mkvmerge -q -o "$OUT/dv-p${profile/./}.mkv" --default-duration 0:24p "$TMP/dv-$profile.hevc"
+done
 
 rm -rf "$TMP"
 ls -lh "$OUT"

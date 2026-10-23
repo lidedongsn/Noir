@@ -4,6 +4,7 @@ options:
   bundleIdPrefix: dev.noir
   deploymentTarget:
     macOS: "15.0"
+    iOS: "18.0"
   createIntermediateGroups: true
 settings:
   base:
@@ -20,6 +21,7 @@ targets:
     platform: macOS
     sources:
       - path: Apps/macOS
+      - path: Apps/Shared
     dependencies:
       - package: NoirKit
         product: NoirEngine
@@ -57,4 +59,56 @@ targets:
         CODE_SIGN_STYLE: Automatic
         CODE_SIGN_IDENTITY: "-"
         COMBINE_HIDPI_IMAGES: YES
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+
+  NoirPhone:
+    type: application
+    platform: iOS
+    sources:
+      - path: Apps/iOS
+      - path: Apps/Shared
+    dependencies:
+      - package: NoirKit
+        product: NoirEngine
+    info:
+      path: Apps/iOS/Info.plist
+      properties:
+        CFBundleDisplayName: 墨影
+        CFBundleDevelopmentRegion: zh-Hans
+        CFBundleLocalizations: [zh-Hans]
+        LSApplicationCategoryType: public.app-category.entertainment
+        NSHumanReadableCopyright: "Copyright © 2026 lidedongsn. MIT License."
+        ITSAppUsesNonExemptEncryption: false
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        # 在「文件」App 中显示为「我的 iPhone › 墨影」，并支持就地打开其他位置的文件
+        # 后台继续播放声音与画中画
+        UIBackgroundModes: [audio]
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        UTImportedTypeDeclarations:
+          - UTTypeIdentifier: org.matroska.mkv
+            UTTypeDescription: Matroska Video
+            UTTypeConformsTo: [public.movie]
+            UTTypeTagSpecification:
+              public.filename-extension: [mkv]
+              public.mime-type: [video/x-matroska]
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: Video
+            CFBundleTypeRole: Viewer
+            LSHandlerRank: Alternate
+            LSItemContentTypes: [org.matroska.mkv, public.mpeg-4, com.apple.quicktime-movie]
+    # 开发团队写在不入库的 Signing.local.xcconfig 中（DEVELOPMENT_TEAM = 团队 ID）
+    configFiles:
+      Debug: Apps/iOS/Signing.xcconfig
+      Release: Apps/iOS/Signing.xcconfig
+    settings:
+      base:
+        PRODUCT_NAME: Noir
+        PRODUCT_BUNDLE_IDENTIFIER: dev.noir.ios
+        TARGETED_DEVICE_FAMILY: "1"
+        CODE_SIGN_STYLE: Automatic
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon

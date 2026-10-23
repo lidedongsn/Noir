@@ -1,0 +1,3 @@
+// 签名配置。开发团队因人而异，写在不入库的 Signing.local.xcconfig 中：
+// DEVELOPMENT_TEAM = 团队 ID
+#include? "Signing.local.xcconfig"

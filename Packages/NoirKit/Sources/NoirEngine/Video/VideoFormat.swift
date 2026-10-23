@@ -27,10 +27,12 @@ enum VideoFormat {
         }
     }
 
-    static func make(_ par: UnsafePointer<AVCodecParameters>) throws -> CMVideoFormatDescription {
+    /// dolbyVision 为 true 时，杜比视界片源按杜比视界描述（'dvh1' 加配置记录），由系统硬件解码并处理逐帧动态元数据；
+    /// 为 false 时按普通 HEVC 描述（只能显示兼容层，用于系统不支持时回退）。
+    static func make(_ par: UnsafePointer<AVCodecParameters>, dolbyVision: Bool = true) throws -> CMVideoFormatDescription {
         let p = par.pointee
         let name = codecName(p.codec_id)
-        guard let codecType = codecType(for: p.codec_id) else {
+        guard var codecType = codecType(for: p.codec_id) else {
             throw VideoFormatError.unsupportedCodec(name)
         }
         // MKV / MP4 中的 extradata 是 hvcC / avcC / av1C 记录，首字节为版本号 1
@@ -43,8 +45,14 @@ enum VideoFormat {
         default: "av1C"
         }
 
+        var atoms: [String: Data] = [atomName: config]
+        if dolbyVision, let dovi = dolbyVisionConfig(par) {
+            codecType = kCMVideoCodecType_DolbyVisionHEVC
+            atoms[dovi.atom] = dovi.record
+        }
+
         var ext: [CFString: Any] = [
-            kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms: [atomName: config],
+            kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms: atoms,
             kCMFormatDescriptionExtension_FullRangeVideo: p.color_range == AVCOL_RANGE_JPEG,
         ]
         // 容器未标注色彩信息时，回退到码流 SPS 中的 VUI
@@ -74,6 +82,30 @@ enum VideoFormat {
         )
         guard status == noErr, let format else { throw VideoFormatError.coreMedia(status) }
         return format
+    }
+
+    // MARK: 杜比视界
+
+    /// 系统可直接解码的杜比视界配置：单层 HEVC 的 Profile 5（IPTPQc2，无兼容层）与 Profile 8.x（HDR10 / SDR / HLG 兼容层）。
+    /// Profile 7（蓝光双层）系统不支持，按 HDR10 基础层播放。
+    /// 返回 MP4 样本描述中的配置记录（Dolby Vision Streams Within the ISO Base Media File Format 3.2）。
+    static func dolbyVisionConfig(_ par: UnsafePointer<AVCodecParameters>) -> (atom: String, record: Data)? {
+        guard par.pointee.codec_id == AV_CODEC_ID_HEVC,
+              let data = par.sideData(AV_PKT_DATA_DOVI_CONF) else { return nil }
+        let r = UnsafeRawPointer(data.baseAddress!).load(as: AVDOVIDecoderConfigurationRecord.self)
+        guard r.dv_profile == 5 || r.dv_profile == 8, r.bl_present_flag != 0 else { return nil }
+
+        var record = Data(count: 24)
+        record[0] = r.dv_version_major
+        record[1] = r.dv_version_minor
+        // dv_profile(7) dv_level(6) rpu_present_flag(1) el_present_flag(1) bl_present_flag(1)
+        let flags = UInt16(r.dv_profile) << 9 | UInt16(r.dv_level) << 3
+            | UInt16(r.rpu_present_flag) << 2 | UInt16(r.el_present_flag) << 1 | UInt16(r.bl_present_flag)
+        record[2] = UInt8(flags >> 8)
+        record[3] = UInt8(flags & 0xFF)
+        // dv_bl_signal_compatibility_id(4) dv_md_compression(2)，其余保留位为 0
+        record[4] = r.dv_bl_signal_compatibility_id << 4 | (r.dv_md_compression & 0x03) << 2
+        return (r.dv_profile <= 7 ? "dvcC" : "dvvC", record)
     }
 
     // MARK: 码流中的色彩信息

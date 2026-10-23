@@ -49,7 +49,8 @@ public final class PlayerController {
 
     public init() {}
 
-    public func open(url: URL) {
+    /// 打开片源并开始播放；startTime 用于续播
+    public func open(url: URL, startTime: Double = 0) {
         close()
         phase = .loading
         title = url.deletingPathExtension().lastPathComponent
@@ -63,9 +64,10 @@ public final class PlayerController {
         session.subtitleLayer.bottomInset = subtitleBottomInset
         Task {
             do {
-                let opened = try await session.open(source: try FileByteSource(url: url))
+                let opened = try await session.open(source: try FileByteSource(url: url), startTime: startTime)
                 guard self.session === session else { return }
                 info = opened.info
+                currentTime = session.currentTime
                 videoTrackID = opened.videoTrackID
                 audioTrackID = opened.audioTrackID
                 subtitleTracks = opened.info.subtitleTracks
@@ -132,6 +134,16 @@ public final class PlayerController {
 
     public func skip(by seconds: Double) {
         seek(to: currentTime + seconds)
+    }
+
+    /// 暂停画面解码，声音继续播放（iOS 后台播放时调用）
+    public func suspendVideo() {
+        session?.suspendVideo()
+    }
+
+    /// 恢复画面解码；系统作废了解码会话时同样从当前位置恢复（iOS 回到前台时调用）
+    public func resumeVideo() {
+        session?.resumeVideo()
     }
 
     public func selectAudioTrack(_ id: Int) {

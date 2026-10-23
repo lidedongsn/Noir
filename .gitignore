@@ -16,6 +16,10 @@ TestMedia/
 *.xcodeproj/
 Apps/macOS/Info.plist
 Apps/macOS/Noir.entitlements
+Apps/iOS/Info.plist
+
+# 个人签名配置
+*.local.xcconfig
 
 # 设计稿（图标源文件、方案对照）不入库
 Design/

@@ -1,5 +1,6 @@
 import AVFoundation
 import CFFmpeg
+import VideoToolbox
 
 /// 播放会话：管理单个片源的解封装、解码与系统渲染器。
 ///
@@ -56,6 +57,17 @@ final class PlaybackSession: @unchecked Sendable {
     private var lastVideoPTS = CMTime.invalid        // queue
     private var lastAudioPTS = CMTime.invalid        // queue
     private var lastError: String?                   // queue
+    /// 硬件解码会话已被系统作废（iOS 进入后台时发生），需重建
+    private var videoInvalidated = false             // queue
+    /// 画面暂停解码（后台仅播放声音）
+    private var videoSuspended = false               // queue
+    /// 画面正在追赶播放时钟（声音不中断地恢复画面），落后于时钟的画面丢弃
+    private var catchingUp = false                   // queue
+    /// 已读到的最后一个音频包的时间戳；读取位置回退后，不晚于 audioSkipThrough 的音频包已处理过，丢弃
+    private var lastReadAudioPTS: Int64?             // queue
+    private var audioSkipThrough: Int64?             // queue
+    /// 是否在解码画面；否时只读取音频与字幕，视频数据包直接丢弃
+    private var videoActive: Bool { !videoInvalidated && !videoSuspended } // queue
     private var timeObserver: Any?
 
     init() {
@@ -81,11 +93,12 @@ final class PlaybackSession: @unchecked Sendable {
         synchronizer.currentTime().seconds
     }
 
-    func open(source: ByteSource) async throws -> Opened {
+    /// 打开片源并从 startTime 开始预缓冲（续播时直接定位，不先显示开头的画面）
+    func open(source: ByteSource, startTime: Double = 0) async throws -> Opened {
         try await withCheckedThrowingContinuation { continuation in
             queue.async {
                 do {
-                    continuation.resume(returning: try self.openOnQueue(source: source))
+                    continuation.resume(returning: try self.openOnQueue(source: source, startTime: startTime))
                 } catch {
                     continuation.resume(throwing: error)
                 }
@@ -112,6 +125,33 @@ final class PlaybackSession: @unchecked Sendable {
     /// 选择内封字幕流并将解码结果写入 track；stream 为 nil 时停止读取内封字幕。
     func selectSubtitle(stream: Int?, track: SubtitleTrack?) {
         queue.async { self.selectSubtitleOnQueue(stream: stream, track: track) }
+    }
+
+    /// 暂停画面解码，声音继续（iOS 后台播放）
+    func suspendVideo() {
+        queue.async {
+            guard !self.videoSuspended else { return }
+            self.videoSuspended = true
+            self.deactivateVideo()
+        }
+    }
+
+    /// 恢复画面解码（回到前台）：重建解码会话。播放中声音与时钟不中断，画面追上后接上；暂停时从当前位置重新定位
+    func resumeVideo() {
+        queue.async {
+            guard self.videoSuspended || self.videoInvalidated else { return }
+            if self.resumeVideoSeamlessly() { return }
+            // 后台期间系统可能已作废解码会话，但没有解码就无从发现，恢复时一律重建
+            if self.videoSuspended { self.videoInvalidated = true }
+            self.videoSuspended = false
+            self.selectStreams()
+            self.seekOnQueue(to: self.synchronizer.currentTime().seconds)
+        }
+    }
+
+    /// 作废视频解码会话，模拟系统在后台作废硬件解码（仅供测试）
+    func invalidateVideoDecoder() {
+        queue.sync { video?.decoder.invalidate() }
     }
 
     /// 获取统计数据；finished 表示片源已读完且播放已到达末尾。
@@ -141,19 +181,22 @@ final class PlaybackSession: @unchecked Sendable {
 
     // MARK: - 打开
 
-    private func openOnQueue(source: ByteSource) throws -> Opened {
+    private func openOnQueue(source: ByteSource, startTime: Double) throws -> Opened {
         let demuxer = try Demuxer(source: source)
         self.demuxer = demuxer
         let info = demuxer.info
 
         // 视频：选择第一条系统可解码的轨道
-        for track in info.videoTracks {
+        // 杜比视界优先按杜比视界解码，系统不支持时回退为兼容层
+        tracks: for track in info.videoTracks {
             let stream = demuxer.stream(track.id)
             let par = UnsafePointer(stream.pointee.codecpar!)
-            if let format = try? VideoFormat.make(par),
-               let decoder = try? VideoDecoder(format: format, reorderDepth: VideoDecoder.reorderDepth(par)) {
-                video = VideoTrack(index: track.id, format: format, timeBase: stream.pointee.time_base, decoder: decoder)
-                break
+            for dolbyVision in [true, false] {
+                if let format = try? VideoFormat.make(par, dolbyVision: dolbyVision),
+                   let decoder = try? VideoDecoder(format: format, reorderDepth: VideoDecoder.reorderDepth(par)) {
+                    video = VideoTrack(index: track.id, format: format, timeBase: stream.pointee.time_base, decoder: decoder)
+                    break tracks
+                }
             }
         }
         // 音频：优先选择默认轨道，否则选择第一条可处理的轨道
@@ -166,13 +209,65 @@ final class PlaybackSession: @unchecked Sendable {
         }
 
         selectStreams()
-        synchronizer.setRate(0, time: .zero)
-        beginPreroll(at: .zero)
+        let duration = info.duration ?? 0
+        if startTime > 0, startTime < duration {
+            seekOnQueue(to: startTime)
+        } else {
+            synchronizer.setRate(0, time: .zero)
+            beginPreroll(at: .zero)
+        }
         return Opened(info: info, videoTrackID: video?.index, audioTrackID: audio?.index)
     }
 
     private func selectStreams() {
-        demuxer?.select(streams: Set([video?.index, audio?.index, subtitle?.index].compactMap { $0 }))
+        let video = videoActive ? self.video?.index : nil
+        demuxer?.select(streams: Set([video, audio?.index, subtitle?.index].compactMap { $0 }))
+    }
+
+    /// 解码会话失效后每秒重试重建；画面已暂停解码（后台仅播放声音）时不重试，由 resumeVideo 恢复
+    private func scheduleVideoRecovery() {
+        queue.asyncAfter(deadline: .now() + 1) { [weak self] in
+            guard let self, self.videoInvalidated, !self.videoSuspended, self.video != nil else { return }
+            if !self.resumeVideoSeamlessly() {
+                self.seekOnQueue(to: self.synchronizer.currentTime().seconds)
+            }
+        }
+    }
+
+    /// 声音不中断地恢复画面：重建解码会话，读取位置回退到当前时间之前的关键帧，
+    /// 画面快速解码追上播放时钟后接上（追上前保留原画面）；回退后重读到的音频包已处理过，丢弃。
+    /// 仅在播放中使用（暂停时没有需要保持连续的声音与时钟），返回是否成功。
+    private func resumeVideoSeamlessly() -> Bool {
+        guard let demuxer, let current = video, synchronizer.rate != 0,
+              let decoder = try? VideoDecoder(format: current.format, reorderDepth: current.decoder.reorderDepth)
+        else { return false }
+        video?.decoder = decoder
+        videoInvalidated = false
+        videoSuspended = false
+        // 先恢复读取视频流再定位，定位才会落在视频关键帧上
+        selectStreams()
+        do {
+            try demuxer.seek(to: synchronizer.currentTime().seconds)
+        } catch {
+            lastError = "\(error)"
+        }
+        // 后台时渲染器可能已失效，需 flush 才能继续；保留当前画面，追上前不黑屏
+        videoRenderer.flush(removingDisplayedImage: false, completionHandler: nil)
+        videoPackets.removeAll()
+        audioSkipThrough = lastReadAudioPTS
+        endOfStream = false
+        videoDrained = false
+        lastVideoPTS = .invalid
+        catchingUp = true
+        videoRenderer.requestMediaDataWhenReady(on: queue) { [weak self] in self?.feedVideo() }
+        return true
+    }
+
+    /// 停止读取与解码画面，已显示的画面保留
+    private func deactivateVideo() {
+        videoRenderer.stopRequestingMediaData()
+        videoPackets.removeAll()
+        selectStreams()
     }
 
     // MARK: - 播放控制
@@ -191,6 +286,16 @@ final class PlaybackSession: @unchecked Sendable {
 
         stopFeeding()
         synchronizer.setRate(0, time: CMTime(seconds: clamped, preferredTimescale: 90_000))
+        if videoInvalidated, let current = video {
+            do {
+                video?.decoder = try VideoDecoder(format: current.format, reorderDepth: current.decoder.reorderDepth)
+                videoInvalidated = false
+                selectStreams()
+            } catch {
+                lastError = "\(error)"
+                scheduleVideoRecovery()
+            }
+        }
         videoRenderer.flush()
         audioRenderer.flush()
         video?.decoder.flush()
@@ -243,13 +348,13 @@ final class PlaybackSession: @unchecked Sendable {
         endOfStream = false
         videoDrained = false
         awaitingPreroll = true
-        videoPrimed = video == nil
+        videoPrimed = video == nil || !videoActive
         audioPrimed = audio == nil
         startFeeding()
     }
 
     private func startFeeding() {
-        if video != nil {
+        if video != nil, videoActive {
             videoRenderer.requestMediaDataWhenReady(on: queue) { [weak self] in self?.feedVideo() }
         }
         if audio != nil {
@@ -268,6 +373,9 @@ final class PlaybackSession: @unchecked Sendable {
         audioSamples.removeAll()
         lastVideoPTS = .invalid
         lastAudioPTS = .invalid
+        lastReadAudioPTS = nil
+        audioSkipThrough = nil
+        catchingUp = false
     }
 
     /// 渲染器只接收约 0.1 秒的已解码画面，另行保持若干帧解码余量，播放队列短暂繁忙时不致断供
@@ -275,6 +383,7 @@ final class PlaybackSession: @unchecked Sendable {
 
     private func feedVideo() {
         guard let video else { return }
+        var skipped = 0
         while videoRenderer.isReadyForMoreMediaData {
             while !videoDrained, video.decoder.bufferedCount() <= video.decoder.reorderDepth + Self.decodeAhead {
                 guard let packet = nextPacket(stream: video.index) else {
@@ -286,6 +395,14 @@ final class PlaybackSession: @unchecked Sendable {
                     try video.decoder.decode(SampleBuffers.video(
                         packet: packet, format: video.format, timeBase: video.timeBase
                     ))
+                } catch SampleBufferError.coreMedia(_, let status) where status == kVTInvalidSessionErr {
+                    videoInvalidated = true
+                    deactivateVideo()
+                    // 不等画面：声音照常起播，播放控制照常响应
+                    videoPrimed = true
+                    startIfPrimed()
+                    scheduleVideoRecovery()
+                    return
                 } catch {
                     // 单帧解码失败不中断播放
                     lastError = "\(error)"
@@ -295,7 +412,19 @@ final class PlaybackSession: @unchecked Sendable {
                 if videoDrained { videoRenderer.stopRequestingMediaData() }
                 break
             }
-            // 跳转目标之前的画面只解码不显示
+            // 跳转目标之前的画面只解码不显示；追赶播放时钟时，来不及显示的画面同样丢弃
+            if catchingUp {
+                guard frame.pts >= synchronizer.currentTime() + CMTime(value: 1, timescale: 20) else {
+                    // 追赶时每丢几帧让出队列，让音频及时补充数据，声音不因画面追赶而断续
+                    skipped += 1
+                    if skipped >= 4 {
+                        queue.async { [weak self] in self?.feedVideo() }
+                        return
+                    }
+                    continue
+                }
+                catchingUp = false
+            }
             guard frame.pts >= target else { continue }
             do {
                 videoRenderer.enqueue(try video.decoder.sampleBuffer(for: frame))
@@ -361,8 +490,11 @@ final class PlaybackSession: @unchecked Sendable {
                 }
                 // find_stream_info 期间缓存的数据包不受 discard 影响，需按流序号分拣
                 if packet.streamIndex == video?.index {
-                    videoPackets.push(packet)
+                    if videoActive { videoPackets.push(packet) }
                 } else if packet.streamIndex == audio?.index {
+                    if let skip = audioSkipThrough, packet.pts != Int64.min, packet.pts <= skip { continue }
+                    audioSkipThrough = nil
+                    lastReadAudioPTS = packet.pts
                     audioPackets.push(packet)
                 } else if packet.streamIndex == subtitle?.index {
                     subtitle?.decoder.decode(packet)

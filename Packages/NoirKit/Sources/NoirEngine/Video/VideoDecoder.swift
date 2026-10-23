@@ -65,6 +65,11 @@ final class VideoDecoder {
         VTDecompressionSessionInvalidate(session)
     }
 
+    /// 作废解码会话，之后的解码返回 kVTInvalidSessionErr（测试中模拟 iOS 进入后台）
+    func invalidate() {
+        VTDecompressionSessionInvalidate(session)
+    }
+
     /// 解码一帧；结果在 nextFrame 中按显示顺序取出
     func decode(_ sample: CMSampleBuffer) throws {
         let duration = CMSampleBufferGetDuration(sample)
