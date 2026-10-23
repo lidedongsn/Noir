@@ -134,4 +134,4 @@ project.yml                  XcodeGen 工程配置
 
 本项目以 [MIT 许可证](LICENSE) 发布。
 
-构建时静态链接 [FFmpeg](https://ffmpeg.org)（LGPL 2.1 或更高版本，未启用 GPL 组件）。仓库不包含 FFmpeg 源码与二进制，由 `scripts/build-ffmpeg.sh` 从官方下载构建；分发编译后的应用时需遵守 LGPL 的相应要求。
+构建时静态链接 [FFmpeg](https://ffmpeg.org)（LGPL 2.1 或更高版本，未启用 GPL 组件）。仓库不包含 FFmpeg 源码与二进制，由 `scripts/build-ffmpeg.sh` 从官方下载构建；分发编译后的应用时需遵守 LGPL 的相应要求；iPhone 版在片库右上角「关于」中注明了 FFmpeg 版本、许可全文与源码地址。

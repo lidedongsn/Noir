@@ -79,3 +79,11 @@ func dictionaryValue(_ dict: OpaquePointer?, _ key: String) -> String? {
     guard let entry = av_dict_get(dict, key, nil, 0), let value = entry.pointee.value else { return nil }
     return String(cString: value)
 }
+
+/// 所链接 FFmpeg 的版本与许可，供「关于」页面注明
+public enum FFmpegLibrary {
+    /// 如「9.0.2」
+    public static var version: String { String(cString: av_version_info()) }
+    /// 如「LGPL version 2.1 or later」
+    public static var license: String { String(cString: avutil_license()) }
+}

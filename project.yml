@@ -67,6 +67,9 @@ targets:
     sources:
       - path: Apps/iOS
       - path: Apps/Shared
+      # 「关于」页面展示的墨影许可证
+      - path: LICENSE
+        buildPhase: resources
     dependencies:
       - package: NoirKit
         product: NoirEngine

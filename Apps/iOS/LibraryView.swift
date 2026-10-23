@@ -6,11 +6,12 @@ struct LibraryView: View {
     /// 播放影片；fromStart 为 true 时忽略续播位置
     let play: (_ url: URL, _ fromStart: Bool) -> Void
     @State private var importing = false
+    @State private var showsAbout = false
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 30) {
-                Header { importing = true }
+                Header(open: { importing = true }, about: { showsAbout = true })
 
                 if let item = library.continueWatching {
                     HeroCard(item: item) { play(item.url, false) }
@@ -42,6 +43,7 @@ struct LibraryView: View {
         .fileImporter(isPresented: $importing, allowedContentTypes: VideoFiles.contentTypes) { result in
             if case .success(let url) = result { play(url, false) }
         }
+        .sheet(isPresented: $showsAbout) { AboutView() }
     }
 
     @ViewBuilder
@@ -63,6 +65,7 @@ struct LibraryView: View {
 
 private struct Header: View {
     let open: () -> Void
+    let about: () -> Void
 
     var body: some View {
         HStack(alignment: .center) {
@@ -76,16 +79,35 @@ private struct Header: View {
                     .foregroundStyle(.white.opacity(0.4))
             }
             Spacer()
-            Button(action: open) {
-                Image(systemName: "folder")
-                    .font(.system(size: 17, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.9))
-                    .frame(width: 44, height: 44)
-                    .background(.white.opacity(0.1), in: Circle())
+            HStack(spacing: 10) {
+                CircleButton("info", label: "关于", action: about)
+                CircleButton("folder", label: "打开文件", action: open)
             }
-            .accessibilityLabel("打开文件")
         }
         .padding(.top, 12)
+    }
+}
+
+private struct CircleButton: View {
+    let symbol: String
+    let label: String
+    let action: () -> Void
+
+    init(_ symbol: String, label: String, action: @escaping () -> Void) {
+        self.symbol = symbol
+        self.label = label
+        self.action = action
+    }
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 17, weight: .medium))
+                .foregroundStyle(.white.opacity(0.9))
+                .frame(width: 44, height: 44)
+                .background(.white.opacity(0.1), in: Circle())
+        }
+        .accessibilityLabel(label)
     }
 }
 
