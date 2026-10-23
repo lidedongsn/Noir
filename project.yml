@@ -29,6 +29,9 @@ targets:
       path: Apps/macOS/Info.plist
       properties:
         CFBundleDisplayName: 墨影
+        # 版本号取自 MARKETING_VERSION 与 CURRENT_PROJECT_VERSION
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         LSApplicationCategoryType: public.app-category.entertainment
         NSHumanReadableCopyright: "Copyright © 2026 lidedongsn. MIT License."
         UTImportedTypeDeclarations:
@@ -77,6 +80,9 @@ targets:
       path: Apps/iOS/Info.plist
       properties:
         CFBundleDisplayName: 墨影
+        # 版本号取自 MARKETING_VERSION 与 CURRENT_PROJECT_VERSION
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         CFBundleDevelopmentRegion: zh-Hans
         CFBundleLocalizations: [zh-Hans]
         LSApplicationCategoryType: public.app-category.entertainment

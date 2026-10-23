@@ -24,6 +24,12 @@
 - **网络片源（iPhone）**：直接播放 WebDAV 上的影片（NAS、阿里云盘官方 WebDAV 等），边看边缓存，默认只在 Wi-Fi 下联网
 - **极简界面**：播放时只有画面，控件按需浮现、自动隐藏；信息面板一键查看编码、动态范围与音频路径
 
+## 下载
+
+Mac 版安装包见 [Releases](https://github.com/lidedongsn/Noir/releases)。未经 Apple 公证，首次打开需在「系统设置 → 隐私与安全性」中点「仍要打开」。
+
+iPhone 版需按下方步骤自行编译安装。
+
 ## 平台状态
 
 | 平台 | 状态 |
@@ -47,6 +53,7 @@ scripts/build-ffmpeg.sh       # 构建 FFmpeg xcframework（macOS / tvOS / iOS�
 scripts/make-test-media.sh    # 生成测试片源至 TestMedia/
 xcodegen generate             # 生成 Noir.xcodeproj
 open Noir.xcodeproj           # 运行 NoirMac（macOS）或 NoirPhone（iPhone）
+scripts/make-dmg.sh           # 打包 Mac 版安装包至 build/
 ```
 
 iPhone 真机运行需新建 `Apps/iOS/Signing.local.xcconfig`（不入库），写入自己的开发团队：`DEVELOPMENT_TEAM = 团队 ID`。

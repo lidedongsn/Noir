@@ -2,6 +2,8 @@
 
 # 构建产物
 .build/
+# scripts/make-dmg.sh 生成的安装包
+build/
 .swiftpm/
 DerivedData/
 xcuserdata/
