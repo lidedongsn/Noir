@@ -5,9 +5,13 @@ enum ExternalSubtitles {
     /// 与视频同名的字幕文件，例如 Movie.srt、Movie.chs.ass、Movie.zh-Hans.srt。
     /// 无法读取所在文件夹（沙盒未授权）时抛出错误。
     static func siblings(of video: URL) throws -> [URL] {
-        let folder = video.deletingLastPathComponent()
+        let files = try FileManager.default.contentsOfDirectory(at: video.deletingLastPathComponent(), includingPropertiesForKeys: nil)
+        return matching(files, video: video)
+    }
+
+    /// 从同一文件夹的文件中挑出与视频同名的字幕（本地或网络文件夹）
+    static func matching(_ files: [URL], video: URL) -> [URL] {
         let base = video.deletingPathExtension().lastPathComponent.lowercased()
-        let files = try FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)
         return files.filter { url in
             SubtitleText.fileExtensions.contains(url.pathExtension.lowercased())
                 && url.deletingPathExtension().lastPathComponent.lowercased().hasPrefix(base)

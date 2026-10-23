@@ -1,20 +1,47 @@
 import SwiftUI
 
-/// 片库首页：继续观看、最近打开与墨影文件夹，影片以截图封面的卡片展示
+/// 片库首页：继续观看、最近打开、网络与墨影文件夹，影片以截图封面的卡片展示
 struct LibraryView: View {
     @Environment(Library.self) private var library
+    @Environment(NetworkSources.self) private var network
     /// 播放影片；fromStart 为 true 时忽略续播位置
-    let play: (_ url: URL, _ fromStart: Bool) -> Void
+    let play: (_ item: Library.Item, _ fromStart: Bool) -> Void
+    /// 播放从「文件」中选择的影片
+    let openFile: (URL) -> Void
     @State private var importing = false
-    @State private var showsAbout = false
+    @State private var showsSettings = false
+    @State private var addingServer = false
+    /// 内容已向上滚动，固定在顶部的标题栏显示背景
+    @State private var scrolled = false
+    /// 正在浏览的网络文件夹
+    @State private var path: [Browse] = []
 
     var body: some View {
+        NavigationStack(path: $path) {
+            content
+                .toolbar(.hidden, for: .navigationBar)
+                .navigationDestination(for: Browse.self) { browse in
+                    BrowserView(server: browse.server, folder: browse.folder, title: browse.title, play: play)
+                }
+        }
+        .sheet(isPresented: $showsSettings) { SettingsView() }
+        .sheet(isPresented: $addingServer) {
+            NavigationStack {
+                ServerEditor(server: nil)
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("取消") { addingServer = false }
+                        }
+                    }
+            }
+        }
+    }
+
+    private var content: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 30) {
-                Header(open: { importing = true }, about: { showsAbout = true })
-
                 if let item = library.continueWatching {
-                    HeroCard(item: item) { play(item.url, false) }
+                    HeroCard(item: item) { play(item, false) }
                         .contextMenu { menu(for: item) }
                 }
                 if !library.recent.isEmpty {
@@ -23,8 +50,8 @@ struct LibraryView: View {
                 if !library.local.isEmpty {
                     Shelf(title: "墨影文件夹", items: library.local, menu: menu, play: play)
                 }
-                if library.recent.isEmpty, library.local.isEmpty {
-                    EmptyState { importing = true }
+                if library.recent.isEmpty, library.local.isEmpty, network.servers.isEmpty {
+                    EmptyState(open: { importing = true }, addServer: { addingServer = true })
                         .padding(.top, 80)
                 } else {
                     Text("把影片放进「文件」App 的「我的 iPhone › 墨影」，会自动出现在这里")
@@ -35,22 +62,41 @@ struct LibraryView: View {
                 }
             }
             .padding(.horizontal, 20)
+            .padding(.top, 18)
             .padding(.bottom, 32)
         }
         .scrollIndicators(.hidden)
+        // 标题与按钮固定在顶部，内容在下方滚动；滚动后淡入磨砂背景
+        .safeAreaInset(edge: .top, spacing: 0) {
+            Header(browse: { path = [$0] }, addServer: { addingServer = true },
+                   open: { importing = true }, settings: { showsSettings = true })
+                .padding(.horizontal, 20)
+                .padding(.bottom, 12)
+                .background {
+                    Rectangle()
+                        .fill(.ultraThinMaterial)
+                        .overlay(Color.black.opacity(0.55))
+                        .overlay(alignment: .bottom) { Divider().overlay(.white.opacity(0.08)) }
+                        .ignoresSafeArea(edges: .top)
+                        .opacity(scrolled ? 1 : 0)
+                }
+                .animation(.easeOut(duration: 0.2), value: scrolled)
+        }
+        .onScrollGeometryChange(for: Bool.self) { $0.contentOffset.y + $0.contentInsets.top > 2 } action: { _, value in
+            scrolled = value
+        }
         .background(Color.black.ignoresSafeArea())
         .refreshable { library.refresh() }
         .fileImporter(isPresented: $importing, allowedContentTypes: VideoFiles.contentTypes) { result in
-            if case .success(let url) = result { play(url, false) }
+            if case .success(let url) = result { openFile(url) }
         }
-        .sheet(isPresented: $showsAbout) { AboutView() }
     }
 
     @ViewBuilder
     private func menu(for item: Library.Item) -> some View {
-        Button("播放", systemImage: "play.fill") { play(item.url, false) }
+        Button("播放", systemImage: "play.fill") { play(item, false) }
         if library.progress[item.key] != nil {
-            Button("从头播放", systemImage: "backward.end.fill") { play(item.url, true) }
+            Button("从头播放", systemImage: "backward.end.fill") { play(item, true) }
         }
         Divider()
         if library.local.contains(item) {
@@ -64,8 +110,10 @@ struct LibraryView: View {
 // MARK: - 顶部
 
 private struct Header: View {
+    let browse: (Browse) -> Void
+    let addServer: () -> Void
     let open: () -> Void
-    let about: () -> Void
+    let settings: () -> Void
 
     var body: some View {
         HStack(alignment: .center) {
@@ -80,11 +128,49 @@ private struct Header: View {
             }
             Spacer()
             HStack(spacing: 10) {
-                CircleButton("info", label: "关于", action: about)
+                NetworkMenu(browse: browse, addServer: addServer)
                 CircleButton("folder", label: "打开文件", action: open)
+                CircleButton("gearshape", label: "设置", action: settings)
             }
         }
         .padding(.top, 12)
+    }
+}
+
+/// 网络片源：列出 WebDAV 服务器，选择后进入浏览
+private struct NetworkMenu: View {
+    @Environment(NetworkSources.self) private var network
+    let browse: (Browse) -> Void
+    let addServer: () -> Void
+
+    var body: some View {
+        Menu {
+            ForEach(network.servers) { server in
+                Button {
+                    browse(Browse(server: server.id, folder: server.url, title: server.name))
+                } label: {
+                    Text(server.name)
+                    Text(network.canStream ? server.url.host() ?? server.url.absoluteString : "仅在 Wi-Fi 下可用")
+                }
+            }
+            if !network.servers.isEmpty { Divider() }
+            Button("添加服务器…", systemImage: "plus", action: addServer)
+        } label: {
+            CircleIcon(symbol: "externaldrive.connected.to.line.below")
+        }
+        .accessibilityLabel("网络")
+    }
+}
+
+private struct CircleIcon: View {
+    let symbol: String
+
+    var body: some View {
+        Image(systemName: symbol)
+            .font(.system(size: 17, weight: .medium))
+            .foregroundStyle(.white.opacity(0.9))
+            .frame(width: 44, height: 44)
+            .background(.white.opacity(0.1), in: Circle())
     }
 }
 
@@ -101,11 +187,7 @@ private struct CircleButton: View {
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: symbol)
-                .font(.system(size: 17, weight: .medium))
-                .foregroundStyle(.white.opacity(0.9))
-                .frame(width: 44, height: 44)
-                .background(.white.opacity(0.1), in: Circle())
+            CircleIcon(symbol: symbol)
         }
         .accessibilityLabel(label)
     }
@@ -166,11 +248,11 @@ private struct HeroCard: View {
 
 // MARK: - 影片列表
 
-private struct Shelf<Menu: View>: View {
+struct Shelf<Menu: View>: View {
     let title: String
     let items: [Library.Item]
     @ViewBuilder let menu: (Library.Item) -> Menu
-    let play: (URL, Bool) -> Void
+    let play: (Library.Item, Bool) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -179,7 +261,7 @@ private struct Shelf<Menu: View>: View {
                 .foregroundStyle(.white.opacity(0.9))
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 160, maximum: 280), spacing: 14, alignment: .top)], spacing: 20) {
                 ForEach(items) { item in
-                    FilmCard(item: item) { play(item.url, false) }
+                    FilmCard(item: item) { play(item, false) }
                         .contextMenu { menu(item) }
                 }
             }
@@ -187,7 +269,7 @@ private struct Shelf<Menu: View>: View {
     }
 }
 
-private struct FilmCard: View {
+struct FilmCard: View {
     @Environment(Library.self) private var library
     let item: Library.Item
     let action: () -> Void
@@ -206,6 +288,16 @@ private struct FilmCard: View {
                                 .padding(8)
                         }
                     }
+                    .overlay(alignment: .topTrailing) {
+                        if item.isRemote {
+                            Image(systemName: "network")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(.white.opacity(0.85))
+                                .padding(5)
+                                .background(.black.opacity(0.45), in: Circle())
+                                .padding(6)
+                        }
+                    }
                     .clipShape(.rect(cornerRadius: 10))
                     .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(.white.opacity(0.08)))
                 VStack(alignment: .leading, spacing: 3) {
@@ -222,6 +314,8 @@ private struct FilmCard: View {
             }
         }
         .buttonStyle(CardStyle())
+        // 浏览网络文件夹时，出现在屏幕上才读取或生成封面
+        .task(id: item.key) { library.requestDetails(for: item) }
     }
 
     /// 例如「2:15:30 · 4K · HDR10 · 58.2 GB」
@@ -239,6 +333,7 @@ private struct FilmCard: View {
 /// 封面图：出现在屏幕上时才读取；尚未生成时显示占位
 private struct Thumbnail: View {
     @Environment(Library.self) private var library
+    @Environment(NetworkSources.self) private var network
     @Environment(\.displayScale) private var scale
     let item: Library.Item
     /// 最大显示宽度（点），按此解码
@@ -249,7 +344,8 @@ private struct Thumbnail: View {
 
     var body: some View {
         let details = library.details[item.key]
-        let loading = details == nil && !library.failed.contains(item.key)
+        // 网络影片的封面只在 Wi-Fi 下生成，其他网络下显示占位图
+        let loading = details == nil && !library.failed.contains(item.key) && (!item.isRemote || network.onWiFi)
         Rectangle()
             .fill(LinearGradient(colors: [Color(white: 0.14), Color(white: 0.07)], startPoint: .top, endPoint: .bottom))
             .overlay {
@@ -303,7 +399,7 @@ private struct ProgressLine: View {
 }
 
 /// 卡片按下时轻微缩小
-private struct CardStyle: ButtonStyle {
+struct CardStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .scaleEffect(configuration.isPressed ? 0.97 : 1)
@@ -313,6 +409,7 @@ private struct CardStyle: ButtonStyle {
 
 private struct EmptyState: View {
     let open: () -> Void
+    let addServer: () -> Void
 
     var body: some View {
         VStack(spacing: 14) {
@@ -322,15 +419,20 @@ private struct EmptyState: View {
             Text("还没有影片")
                 .font(.headline)
                 .foregroundStyle(.white.opacity(0.85))
-            Text("从「文件」中打开影片，\n或把影片放进「我的 iPhone › 墨影」文件夹")
+            Text("从「文件」中打开影片，把影片放进「我的 iPhone › 墨影」文件夹，\n或添加 WebDAV 服务器（如阿里云盘官方 WebDAV、NAS）")
                 .font(.subheadline)
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.white.opacity(0.45))
-            Button("打开文件", action: open)
-                .buttonStyle(.borderedProminent)
-                .tint(.white)
-                .foregroundStyle(.black)
-                .padding(.top, 6)
+            HStack(spacing: 12) {
+                Button("打开文件", action: open)
+                    .buttonStyle(.borderedProminent)
+                    .tint(.white)
+                    .foregroundStyle(.black)
+                Button("添加服务器", action: addServer)
+                    .buttonStyle(.bordered)
+                    .tint(.white)
+            }
+            .padding(.top, 6)
         }
         .frame(maxWidth: .infinity)
     }

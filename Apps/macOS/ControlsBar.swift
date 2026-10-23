@@ -130,10 +130,12 @@ private struct ScrubBar: View {
             let played = dragFraction ?? min(max(player.currentTime / duration, 0), 1)
             let height: CGFloat = active ? 3 : 2
 
+            // 线条高度单独指定：圆点比线条高，不能让它撑高整个容器
             ZStack(alignment: .leading) {
                 Capsule().fill(.white.opacity(0.14))
+                    .frame(height: height)
                 Capsule().fill(.white.opacity(0.7))
-                    .frame(width: max(width * played, height))
+                    .frame(width: max(width * played, height), height: height)
                 Circle().fill(.white)
                     .frame(width: 9, height: 9)
                     .offset(x: width * played - 4.5)

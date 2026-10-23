@@ -90,6 +90,11 @@ targets:
         # 在「文件」App 中显示为「我的 iPhone › 墨影」，并支持就地打开其他位置的文件
         # 后台继续播放声音与画中画
         UIBackgroundModes: [audio]
+        # WebDAV：局域网 NAS、OpenList 多为 http；首次访问局域网时系统请求本地网络权限
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+          NSAllowsLocalNetworking: true
+        NSLocalNetworkUsageDescription: 墨影需要访问局域网中的 WebDAV 服务器（如 NAS），以播放其中的影片。
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true
         UTImportedTypeDeclarations:

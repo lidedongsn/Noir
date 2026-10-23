@@ -91,4 +91,10 @@ public struct PlaybackStats: Sendable {
     public var outputChannels: Int?
     public var audioRoute: AudioRoute?
     public var lastError: String?
+    /// 网络片源数据不足，正在缓冲
+    public var buffering = false
+    /// 网络片源：下载速度（字节/秒）、从播放位置往后已缓存的时长（秒）、已缓存比例
+    public var downloadRate: Double?
+    public var cachedAhead: Double?
+    public var cachedFraction: Double?
 }

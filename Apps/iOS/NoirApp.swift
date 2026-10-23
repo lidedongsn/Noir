@@ -7,11 +7,17 @@ import UniformTypeIdentifiers
 struct NoirApp: App {
     @UIApplicationDelegateAdaptor private var delegate: AppDelegate
     @State private var player = PlayerController()
-    @State private var library = Library()
+    @State private var network: NetworkSources
+    @State private var library: Library
     @State private var playing = false
+    /// 正在播放的网络影片的块缓存目录，清理缓存时保留
+    @State private var playingCache: URL?
     @Environment(\.scenePhase) private var scenePhase
 
     init() {
+        let network = NetworkSources()
+        _network = State(initialValue: network)
+        _library = State(initialValue: Library(network: network))
         FolderAccess.restore()
         // 影片播放：不受静音开关影响，允许多声道输出（AirPods 空间音频、AirPlay 功放）
         let session = AVAudioSession.sharedInstance()
@@ -23,11 +29,13 @@ struct NoirApp: App {
         WindowGroup {
             // 播放界面叠在片库之上并以淡入淡出切换（而非系统全屏弹出），旋转在黑场中完成
             ZStack {
-                LibraryView(play: play)
+                LibraryView(play: play, openFile: { play($0, fromStart: false) })
                     .environment(library)
+                    .environment(network)
                 if playing {
                     PlayerView(dismiss: closePlayer)
                         .environment(player)
+                        .environment(network)
                         .transition(.opacity)
                         .zIndex(1)
                 }
@@ -35,6 +43,13 @@ struct NoirApp: App {
                 // 从「文件」或其他 App 的分享菜单打开
                 .onOpenURL { play($0, fromStart: false) }
                 .preferredColorScheme(.dark)
+                .onAppear {
+                        // 网络恢复：正在播放的网络影片立即重试下载，补上之前没截的封面
+                        network.onReconnect = {
+                            player.network?.retryNow()
+                            library.refresh()
+                        }
+                    }
                 .onChange(of: scenePhase) { _, phase in
                     switch phase {
                     case .active: library.refresh()
@@ -53,10 +68,34 @@ struct NoirApp: App {
         withAnimation(.easeOut(duration: 0.25)) { playing = true }
     }
 
+    private func play(_ item: Library.Item, fromStart: Bool) {
+        guard let server = item.server else { return play(item.url, fromStart: fromStart) }
+        guard let webdav = network.client(for: server), let version = item.version,
+              let cache = network.cache(server: server, key: item.key, size: item.size, version: version) else { return }
+        if playing { saveProgress() }
+        try? AVAudioSession.sharedInstance().setActive(true)
+        library.remember(remote: item)
+        // 先为这部影片腾出缓存空间
+        setPlayingCache(cache.directory)
+        network.pruneCache(reserving: min(network.cacheLimitBytes, item.size))
+        let entry = WebDAVEntry(url: item.url, name: item.url.lastPathComponent, isDirectory: false,
+                                size: item.size, modified: item.date, etag: nil)
+        player.open(remote: entry, webdav: webdav, cache: cache, startTime: fromStart ? 0 : library.resumePosition(for: item.url))
+        withAnimation(.easeOut(duration: 0.25)) { playing = true }
+    }
+
+    private func setPlayingCache(_ directory: URL?) {
+        if let playingCache { network.activeCaches.remove(playingCache) }
+        playingCache = directory
+        if let directory { network.activeCaches.insert(directory) }
+    }
+
     private func closePlayer() {
         saveProgress()
         withAnimation(.easeOut(duration: 0.25)) { playing = false }
         player.close()
+        setPlayingCache(nil)
+        network.pruneCache()
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 

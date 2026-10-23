@@ -6,6 +6,7 @@ import SwiftUI
 /// 单击显示/隐藏控件，双击暂停，左右滑动快进快退，左半边上下滑动调亮度、右半边调音量，双指捏合切换填满屏幕。
 struct PlayerView: View {
     @Environment(PlayerController.self) private var player
+    @Environment(NetworkSources.self) private var network
     @Environment(\.scenePhase) private var scenePhase
     let dismiss: () -> Void
 
@@ -137,6 +138,24 @@ struct PlayerView: View {
             }
         }
         .task(id: player.isPlaying) { await autoHide() }
+        .onChange(of: network.streamingOnCellular, initial: true) { updatePrefetch() }
+        .onChange(of: player.phase) { updatePrefetch() }
+    }
+
+    /// 网络影片的缓存是跟着播放位置滚动的窗口：总占用不超过缓存上限，看过的部分随看随删（保留一小段供回拖），
+    /// 其余用于往后预缓存；用蜂窝网络时只往后约 5 分钟
+    private func updatePrefetch() {
+        guard let source = player.network, let size = source.size else { return }
+        let budget = network.playbackBudget(currentlyCached: source.cache.cachedBytes)
+        let behind: Int64 = 64 << 20
+        // 预缓存窗口留出回拖部分与两块余量，避免刚下载就被清理
+        var ahead = budget - behind - Int64(2 * source.cache.blockSize)
+        if network.streamingOnCellular, player.duration > 0 {
+            ahead = min(ahead, Int64(Double(size) / player.duration * 300))
+        }
+        source.setCacheBudget(budget >= size ? nil : budget, keepBehind: behind)
+        // 空间很紧时仍保留一小段预缓存，保证能播放
+        source.setPrefetchLimit(ahead >= size ? nil : max(ahead, 32 << 20))
     }
 
     /// 画面区域：视频、控件与各种提示，竖屏与横屏共用同一视图
@@ -168,7 +187,17 @@ struct PlayerView: View {
             switch player.phase {
             case .idle, .loading: ProgressView().tint(.white)
             case .failed(let message): FailureView(message: message, dismiss: close)
-            case .ready: EmptyView()
+            case .ready:
+                // 网络影片数据不足时缓冲
+                if player.stats.buffering { ProgressView().tint(.white).controlSize(.large) }
+            }
+
+            if player.network != nil, player.phase == .ready, !network.canStream {
+                NetworkNotice(text: player.stats.buffering ? "连接 Wi-Fi 后继续播放" : "Wi-Fi 已断开，正在播放已缓存的部分")
+                    .frame(maxHeight: .infinity, alignment: .top)
+                    .padding(.top, fullscreen ? 24 : 12)
+                    .allowsHitTesting(false)
+                    .transition(.opacity)
             }
 
             if player.phase == .ready {
@@ -295,9 +324,10 @@ struct PlayerView: View {
     }
 
     private func autoHide() async {
+        // 播放中 1.2 秒无操作后隐藏；每 0.1 秒检查一次，隐藏时机误差不超过 0.1 秒
         while !Task.isCancelled {
-            try? await Task.sleep(for: .milliseconds(250))
-            if player.isPlaying, controlsVisible, !showsInfo, Date.now.timeIntervalSince(lastActivity) > 3 {
+            try? await Task.sleep(for: .milliseconds(100))
+            if player.isPlaying, controlsVisible, !showsInfo, Date.now.timeIntervalSince(lastActivity) > 1.2 {
                 withAnimation(.easeOut(duration: 0.25)) { controlsVisible = false }
             }
         }
@@ -350,6 +380,20 @@ private struct LevelHUD: View {
 }
 
 // MARK: - 错误
+
+/// 画面顶部的网络提示
+private struct NetworkNotice: View {
+    let text: String
+
+    var body: some View {
+        Label(text, systemImage: "wifi.slash")
+            .font(.footnote.weight(.medium))
+            .foregroundStyle(.white.opacity(0.9))
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .background(.black.opacity(0.6), in: Capsule())
+    }
+}
 
 private struct FailureView: View {
     let message: String

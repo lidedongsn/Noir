@@ -18,7 +18,12 @@ public enum Thumbnailer {
 
     /// 读取片源并截取封面，宽度不超过 maxWidth 像素。耗时操作，勿在主线程调用。
     public static func make(url: URL, maxWidth: Int) throws -> Result {
-        try withVideo(url) { demuxer, video in
+        try withFile(url) { try make(source: $0, maxWidth: maxWidth) }
+    }
+
+    /// 同上，从任意片源（如网络片源）读取
+    public static func make(source: ByteSource, maxWidth: Int) throws -> Result {
+        try withVideo(source) { demuxer, video in
             guard let video else { return Result(info: demuxer.info, image: nil) }
             let duration = demuxer.info.duration ?? 0
             var fallback: CGImage?
@@ -33,16 +38,24 @@ public enum Thumbnailer {
 
     /// 精确截取 seconds 处显示的画面（续播封面）：从之前的关键帧解码到目标时间
     public static func frame(url: URL, at seconds: Double, maxWidth: Int) throws -> CGImage? {
-        try withVideo(url) { demuxer, video in
+        try withFile(url) { try frame(source: $0, at: seconds, maxWidth: maxWidth) }
+    }
+
+    public static func frame(source: ByteSource, at seconds: Double, maxWidth: Int) throws -> CGImage? {
+        try withVideo(source) { demuxer, video in
             try video?.exactFrame(demuxer, at: seconds, maxWidth: maxWidth)
         }
     }
 
-    /// 打开片源并准备视频轨的解码参数
-    private static func withVideo<T>(_ url: URL, _ body: (Demuxer, Video?) throws -> T) throws -> T {
+    private static func withFile<T>(_ url: URL, _ body: (ByteSource) throws -> T) throws -> T {
         let scoped = url.startAccessingSecurityScopedResource()
         defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-        let demuxer = try Demuxer(source: try FileByteSource(url: url))
+        return try body(try FileByteSource(url: url))
+    }
+
+    /// 打开片源并准备视频轨的解码参数
+    private static func withVideo<T>(_ source: ByteSource, _ body: (Demuxer, Video?) throws -> T) throws -> T {
+        let demuxer = try Demuxer(source: source)
         guard let track = demuxer.info.videoTracks.first else { return try body(demuxer, nil) }
         let stream = demuxer.stream(track.id)
         let par = UnsafePointer(stream.pointee.codecpar!)

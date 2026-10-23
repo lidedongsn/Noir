@@ -3,62 +3,53 @@ import SwiftUI
 
 /// 关于：版本、源代码与开源许可（含 FFmpeg 的 LGPL 声明）
 struct AboutView: View {
-    @Environment(\.dismiss) private var dismiss
-
     private static let repository = URL(string: "https://github.com/lidedongsn/Noir")!
 
     var body: some View {
-        NavigationStack {
-            List {
-                Section {
-                    VStack(spacing: 8) {
-                        if let icon = UIImage(named: "AppIcon") {
-                            Image(uiImage: icon)
-                                .resizable()
-                                .frame(width: 72, height: 72)
-                                .clipShape(.rect(cornerRadius: 16))
-                        }
-                        Text("墨影 Noir")
-                            .font(.title3.weight(.semibold))
-                        Text("版本 \(Self.appVersion)")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
+        List {
+            Section {
+                VStack(spacing: 8) {
+                    if let icon = UIImage(named: "AppIcon") {
+                        Image(uiImage: icon)
+                            .resizable()
+                            .frame(width: 72, height: 72)
+                            .clipShape(.rect(cornerRadius: 16))
                     }
-                    .frame(maxWidth: .infinity)
-                    .listRowBackground(Color.clear)
+                    Text("墨影 Noir")
+                        .font(.title3.weight(.semibold))
+                    Text("版本 \(Self.appVersion)")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
                 }
+                .frame(maxWidth: .infinity)
+                .listRowBackground(Color.clear)
+            }
 
-                Section {
-                    Link(destination: Self.repository) {
-                        LabeledContent("源代码", value: "GitHub")
-                    }
-                }
-
-                Section {
-                    NavigationLink {
-                        LicenseText(title: "墨影", resource: "LICENSE", extension: nil)
-                    } label: {
-                        LabeledContent("墨影", value: "MIT")
-                    }
-                    NavigationLink {
-                        LicenseText(title: "FFmpeg", resource: "FFmpeg-LGPL-2.1", extension: "txt")
-                    } label: {
-                        LabeledContent("FFmpeg \(FFmpegLibrary.version)", value: "LGPL 2.1+")
-                    }
-                } header: {
-                    Text("开源许可")
-                } footer: {
-                    Text(Self.ffmpegNotice)
+            Section {
+                Link(destination: Self.repository) {
+                    LabeledContent("源代码", value: "GitHub")
                 }
             }
-            .navigationTitle("关于")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("完成") { dismiss() }
+
+            Section {
+                NavigationLink {
+                    LicenseText(title: "墨影", resource: "LICENSE", extension: nil)
+                } label: {
+                    LabeledContent("墨影", value: "MIT")
                 }
+                NavigationLink {
+                    LicenseText(title: "FFmpeg", resource: "FFmpeg-LGPL-2.1", extension: "txt")
+                } label: {
+                    LabeledContent("FFmpeg \(FFmpegLibrary.version)", value: "LGPL 2.1+")
+                }
+            } header: {
+                Text("开源许可")
+            } footer: {
+                Text(Self.ffmpegNotice)
             }
         }
+        .navigationTitle("关于墨影")
+        .navigationBarTitleDisplayMode(.inline)
     }
 
     private static var appVersion: String {

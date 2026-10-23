@@ -28,6 +28,9 @@ public final class PlayerController {
     /// 能否读取片源所在文件夹；沙盒未授权时无法自动加载同名外挂字幕
     public private(set) var canReadSourceFolder = true
     public private(set) var sourceURL: URL?
+    /// 网络片源（WebDAV）；本地文件时为 nil
+    public private(set) var network: RemoteByteSource?
+    private var webdav: WebDAVClient?
     public private(set) var subtitleError: String?
     /// 底部被控制条遮挡的高度，字幕据此上移
     public var subtitleBottomInset: CGFloat = 0 {
@@ -49,13 +52,26 @@ public final class PlayerController {
 
     public init() {}
 
-    /// 打开片源并开始播放；startTime 用于续播
+    /// 打开本地片源并开始播放；startTime 用于续播
     public func open(url: URL, startTime: Double = 0) {
         close()
+        if url.startAccessingSecurityScopedResource() { scopedURL = url }
+        start(url: url, startTime: startTime) { try FileByteSource(url: url) }
+    }
+
+    /// 打开 WebDAV 上的片源：读取经由 cache 缓存，播放时往后预缓存
+    public func open(remote entry: WebDAVEntry, webdav: WebDAVClient, cache: BlockCache, startTime: Double = 0) {
+        close()
+        let source = RemoteByteSource(cache: cache, transport: webdav.transport(for: entry.url))
+        network = source
+        self.webdav = webdav
+        start(url: entry.url, startTime: startTime) { source }
+    }
+
+    private func start(url: URL, startTime: Double, source makeSource: @escaping @Sendable () throws -> ByteSource) {
         phase = .loading
         title = url.deletingPathExtension().lastPathComponent
         sourceURL = url
-        if url.startAccessingSecurityScopedResource() { scopedURL = url }
 
         let session = PlaybackSession()
         self.session = session
@@ -64,10 +80,13 @@ public final class PlayerController {
         session.subtitleLayer.bottomInset = subtitleBottomInset
         Task {
             do {
-                let opened = try await session.open(source: try FileByteSource(url: url), startTime: startTime)
+                let opened = try await session.open(source: try makeSource(), startTime: startTime)
                 guard self.session === session else { return }
                 info = opened.info
                 currentTime = session.currentTime
+                if let network, let size = network.size, let duration = opened.info.duration, duration > 0 {
+                    network.setPacing(bytesPerSecond: Double(size) / duration)
+                }
                 videoTrackID = opened.videoTrackID
                 audioTrackID = opened.audioTrackID
                 subtitleTracks = opened.info.subtitleTracks
@@ -90,6 +109,9 @@ public final class PlayerController {
         ticker = nil
         session?.close()
         session = nil
+        network?.close()
+        network = nil
+        webdav = nil
         scopedURL?.stopAccessingSecurityScopedResource()
         scopedURL = nil
         displayLayer = nil
@@ -193,6 +215,12 @@ public final class PlayerController {
 
     private func loadSiblingSubtitles() async {
         guard let sourceURL else { return }
+        if let webdav {
+            // 网络片源：列出所在目录；读不到时不影响播放
+            let files = (try? await webdav.list(sourceURL.deletingLastPathComponent()))?.map(\.url) ?? []
+            _ = await loadSubtitleFiles(ExternalSubtitles.matching(files, video: sourceURL))
+            return
+        }
         do {
             let urls = try ExternalSubtitles.siblings(of: sourceURL)
             canReadSourceFolder = true
@@ -205,14 +233,27 @@ public final class PlayerController {
     /// 解析外挂字幕，返回新增轨道的 ID
     private func loadSubtitleFiles(_ urls: [URL]) async -> [Int] {
         let session = self.session
+        let http = webdav?.client
         var added: [Int] = []
         for url in urls where !externalSubtitleURLs.contains(url.standardizedFileURL) {
             let info = ExternalSubtitles.info(for: url, video: sourceURL, id: nextExternalID)
-            let result = await Task.detached {
-                let scoped = url.startAccessingSecurityScopedResource()
-                defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-                return Result { try SubtitleText.load(url: url, info: info) }
-            }.value
+            let result: Result<SubtitleTrack, Error>
+            if url.isFileURL {
+                result = await Task.detached {
+                    let scoped = url.startAccessingSecurityScopedResource()
+                    defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+                    return Result { try SubtitleText.load(url: url, info: info) }
+                }.value
+            } else if let http {
+                do {
+                    let data = try await http.download(url)
+                    result = Result { try SubtitleText.load(data: data, url: url, info: info) }
+                } catch {
+                    result = .failure(error)
+                }
+            } else {
+                continue
+            }
             guard self.session === session else { return [] }
             switch result {
             case .success(let track):
@@ -258,7 +299,12 @@ public final class PlayerController {
                 self.currentTime = session.currentTime
                 let snapshot = await session.snapshot()
                 guard !Task.isCancelled, self.session === session else { return }
-                self.stats = snapshot.stats
+                var stats = snapshot.stats
+                if let network = self.network, let size = network.size, size > 0 {
+                    stats.downloadRate = network.downloadRate
+                    stats.cachedFraction = Double(network.cache.cachedBytes) / Double(size)
+                }
+                self.stats = stats
                 if snapshot.finished, self.isPlaying {
                     self.pause()
                 }

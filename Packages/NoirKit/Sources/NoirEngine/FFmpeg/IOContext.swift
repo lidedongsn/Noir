@@ -4,8 +4,9 @@ import Foundation
 /// 将 ByteSource 桥接为 FFmpeg 的 AVIOContext。
 /// FFmpeg 构建时未启用任何协议，全部 I/O 经由此处。
 final class IOContext {
-    private let source: ByteSource
-    private var position: Int64 = 0
+    let source: ByteSource
+    /// 片源中下一次读取的位置
+    private(set) var position: Int64 = 0
     private(set) var avio: UnsafeMutablePointer<AVIOContext>!
 
     /// 读缓冲 1 MB：高码率片源下以大块读取减少系统调用次数

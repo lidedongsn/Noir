@@ -156,7 +156,7 @@ private struct TimeText: View {
     }
 }
 
-/// 进度条：按住拖动，松手跳转
+/// 进度条：平时只是一条细线，按住时加粗并出现圆形滑块，拖动后松手跳转
 private struct ScrubBar: View {
     @Environment(PlayerController.self) private var player
     @Binding var dragFraction: Double?
@@ -168,16 +168,20 @@ private struct ScrubBar: View {
             let duration = max(player.duration, 0.001)
             let played = dragFraction ?? min(max(player.currentTime / duration, 0), 1)
             let dragging = dragFraction != nil
+            // 线条高度单独指定：圆点比线条高，不能让它撑高整个容器
+            let thickness: CGFloat = dragging ? 5 : 2.5
 
             ZStack(alignment: .leading) {
                 Capsule().fill(.white.opacity(0.2))
+                    .frame(height: thickness)
                 Capsule().fill(.white.opacity(0.85))
-                    .frame(width: max(width * played, 4))
+                    .frame(width: max(width * played, thickness), height: thickness)
                 Circle().fill(.white)
-                    .frame(width: dragging ? 18 : 12, height: dragging ? 18 : 12)
-                    .offset(x: width * played - (dragging ? 9 : 6))
+                    .frame(width: 18, height: 18)
+                    .scaleEffect(dragging ? 1 : 0.3)
+                    .opacity(dragging ? 1 : 0)
+                    .offset(x: width * played - 9)
             }
-            .frame(height: dragging ? 6 : 4)
             .frame(maxHeight: .infinity)
             .contentShape(Rectangle())
             .gesture(

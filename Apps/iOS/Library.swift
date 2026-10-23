@@ -6,7 +6,7 @@ import Observation
 import UIKit
 
 /// 片库：墨影文件夹（App 的 Documents，在「文件」App 中显示为「我的 iPhone › 墨影」）中的影片，
-/// 以及从其他位置打开过的影片。其他位置的文件以书签保存，下次无需重新选择。
+/// 以及从其他位置打开过的影片与网络影片。其他位置的文件以书签保存，下次无需重新选择。
 /// 同时管理封面、媒体标签与播放进度：封面缓存在 Caches 目录，影片不在片库中后随之删除；
 /// 内存中只保留最近显示的封面，按显示尺寸解码。
 @MainActor @Observable
@@ -16,9 +16,47 @@ final class Library {
         var name: String
         var size: Int64
         var date: Date
+        /// 网络影片所在的 WebDAV 服务器；本地影片为 nil
+        var server: UUID?
+        /// 网络影片在服务器上的版本，变化后缓存失效
+        var version: String?
         var id: URL { url }
-        /// 文件名加大小标识同一部影片，文件被移动或重新授权后封面与进度仍可对应
-        var key: String { "\(url.lastPathComponent)|\(size)" }
+        var isRemote: Bool { server != nil }
+        /// 本地影片以文件名加大小标识，文件被移动或重新授权后封面与进度仍可对应；
+        /// 网络影片以服务器、路径加大小标识
+        var key: String {
+            guard let server else { return "\(url.lastPathComponent)|\(size)" }
+            return "remote|\(server.uuidString)|\(url.path(percentEncoded: false))|\(size)"
+        }
+
+        init(url: URL, name: String, size: Int64, date: Date, server: UUID? = nil, version: String? = nil) {
+            self.url = url
+            self.name = name
+            self.size = size
+            self.date = date
+            self.server = server
+            self.version = version
+        }
+
+        init(remote entry: WebDAVEntry, server: UUID) {
+            self.init(url: entry.url, name: (entry.name as NSString).deletingPathExtension, size: entry.size ?? 0,
+                      date: entry.modified ?? .distantPast, server: server, version: entry.version)
+        }
+    }
+
+    /// 「最近打开」的记录：其他位置的本地文件存书签，网络影片存地址与属性
+    private enum Recent: Codable {
+        case file(Data)
+        case remote(RemoteRecord)
+    }
+
+    private struct RemoteRecord: Codable {
+        var server: UUID
+        var url: URL
+        var name: String
+        var size: Int64
+        var date: Date
+        var version: String
     }
 
     /// 封面与媒体标签
@@ -40,7 +78,7 @@ final class Library {
 
     /// 墨影文件夹中的影片，按修改时间倒序
     private(set) var local: [Item] = []
-    /// 从其他位置打开过的影片，最近的在前
+    /// 从其他位置打开过的影片与网络影片，最近的在前
     private(set) var recent: [Item] = []
     private(set) var details: [String: Details] = [:]
     /// 本次读取失败的影片，下次刷新时重试
@@ -56,7 +94,9 @@ final class Library {
             .max { progress[$0.key]!.date < progress[$1.key]!.date }
     }
 
-    private static let recentKey = "recentFiles"
+    /// 旧版只记录本地书签
+    private static let legacyRecentKey = "recentFiles"
+    private static let recentKey = "recentItems"
     private static let progressKey = "playbackProgress"
     private static let recentLimit = 20
     private let documents = URL.documentsDirectory
@@ -74,7 +114,10 @@ final class Library {
         return cache
     }()
 
-    init() {
+    let network: NetworkSources
+
+    init(network: NetworkSources) {
+        self.network = network
         try? FileManager.default.createDirectory(at: cache, withIntermediateDirectories: true)
         if let data = UserDefaults.standard.data(forKey: Self.progressKey),
            let stored = try? JSONDecoder().decode([String: Progress].self, from: data) {
@@ -89,19 +132,28 @@ final class Library {
             .compactMap { $0 as? URL } ?? []
         local = files.filter(Self.isVideo).compactMap(Self.item).sorted { $0.date > $1.date }
 
-        var bookmarks: [Data] = []
+        var records: [Recent] = []
         recent = []
-        for bookmark in storedBookmarks() {
-            var stale = false
-            guard let url = try? URL(resolvingBookmarkData: bookmark, bookmarkDataIsStale: &stale) else { continue }
-            let scoped = url.startAccessingSecurityScopedResource()
-            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-            // 文件已被删除或移走时不再保留
-            guard let item = Self.item(url) else { continue }
-            recent.append(item)
-            bookmarks.append(stale ? (try? url.bookmarkData()) ?? bookmark : bookmark)
+        for record in storedRecents() {
+            switch record {
+            case .file(let bookmark):
+                var stale = false
+                guard let url = try? URL(resolvingBookmarkData: bookmark, bookmarkDataIsStale: &stale) else { continue }
+                let scoped = url.startAccessingSecurityScopedResource()
+                defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+                // 文件已被删除或移走时不再保留
+                guard let item = Self.item(url) else { continue }
+                recent.append(item)
+                records.append(.file(stale ? (try? url.bookmarkData()) ?? bookmark : bookmark))
+            case .remote(let remote):
+                // 服务器已删除时不再保留；服务器暂时连不上时保留
+                guard network.server(remote.server) != nil else { continue }
+                recent.append(Item(url: remote.url, name: remote.name, size: remote.size, date: remote.date,
+                                   server: remote.server, version: remote.version))
+                records.append(record)
+            }
         }
-        UserDefaults.standard.set(bookmarks, forKey: Self.recentKey)
+        storeRecents(records)
         removeOrphans()
         failed = []
         failedResume = []
@@ -115,23 +167,38 @@ final class Library {
         let scoped = url.startAccessingSecurityScopedResource()
         defer { if scoped { url.stopAccessingSecurityScopedResource() } }
         guard let bookmark = try? url.bookmarkData() else { return }
-        var bookmarks = storedBookmarks()
+        var records = storedRecents()
         // 同一文件只保留最新一条
-        bookmarks.removeAll { data in
+        records.removeAll { record in
+            guard case .file(let data) = record else { return false }
             var stale = false
             return (try? URL(resolvingBookmarkData: data, bookmarkDataIsStale: &stale))?.standardizedFileURL == url.standardizedFileURL
         }
-        bookmarks.insert(bookmark, at: 0)
-        UserDefaults.standard.set(Array(bookmarks.prefix(Self.recentLimit)), forKey: Self.recentKey)
+        records.insert(.file(bookmark), at: 0)
+        storeRecents(records)
+        refresh()
+    }
+
+    /// 记录打开过的网络影片
+    func remember(remote item: Item) {
+        guard let server = item.server, let version = item.version else { return }
+        var records = storedRecents()
+        records.removeAll { record in
+            guard case .remote(let remote) = record else { return false }
+            return remote.server == server && remote.url == item.url
+        }
+        records.insert(.remote(RemoteRecord(server: server, url: item.url, name: item.name, size: item.size,
+                                            date: item.date, version: version)), at: 0)
+        storeRecents(records)
         refresh()
     }
 
     /// 从「最近打开」中移除（不删除文件）
     func forget(_ item: Item) {
-        var bookmarks = storedBookmarks()
-        if let index = recent.firstIndex(of: item), index < bookmarks.count {
-            bookmarks.remove(at: index)
-            UserDefaults.standard.set(bookmarks, forKey: Self.recentKey)
+        var records = storedRecents()
+        if let index = recent.firstIndex(of: item), index < records.count {
+            records.remove(at: index)
+            storeRecents(records)
         }
         refresh()
     }
@@ -183,9 +250,15 @@ final class Library {
 
     // MARK: - 封面
 
-    /// 加载封面标签：先读缓存，没有缓存的依次在后台生成
-    private func loadDetails() {
-        let missing = (recent + local).filter { details[$0.key] == nil && !pending.contains($0.key) }
+    /// 浏览网络文件夹时，为出现在屏幕上的影片读取或生成封面
+    func requestDetails(for item: Item) {
+        guard !failed.contains(item.key) else { return }
+        loadDetails([item])
+    }
+
+    /// 加载封面标签：先读缓存，没有缓存的依次在后台生成。网络影片只在 Wi-Fi 下生成
+    private func loadDetails(_ items: [Item]? = nil) {
+        let missing = (items ?? recent + local).filter { details[$0.key] == nil && !pending.contains($0.key) }
         var queue: [Item] = []
         for item in missing {
             if let data = try? Data(contentsOf: cacheURL(item.key).appendingPathExtension("json")),
@@ -195,16 +268,26 @@ final class Library {
                 queue.append(item)
             }
         }
+        queue.removeAll { $0.isRemote && !network.onWiFi }
         guard !queue.isEmpty else { return }
         pending.formUnion(queue.map(\.key))
-        let cache = self.cache
         Task {
             // 逐个生成，避免同时解码多部 4K 影片
             for item in queue {
-                let base = cache.appending(path: Self.hash(item.key))
-                let generated = await Task.detached(priority: .utility) {
-                    Self.generate(item.url, base: base)
-                }.value
+                let base = cacheURL(item.key)
+                try? FileManager.default.createDirectory(at: base.deletingLastPathComponent(), withIntermediateDirectories: true)
+                let generated: Details?
+                if item.isRemote {
+                    let source = network.onWiFi ? remoteSource(for: item, prefetching: false) : nil
+                    generated = await Task.detached(priority: .utility) {
+                        defer { source?.close() }
+                        return source.flatMap { source in Self.generate(base: base) { try Thumbnailer.make(source: source, maxWidth: 960) } }
+                    }.value
+                } else {
+                    generated = await Task.detached(priority: .utility) {
+                        Self.generate(base: base) { try Thumbnailer.make(url: item.url, maxWidth: 960) }
+                    }.value
+                }
                 pending.remove(item.key)
                 if let generated {
                     details[item.key] = generated
@@ -254,9 +337,19 @@ final class Library {
         }
         guard let item = candidates.first, let progress = progress[item.key] else { return }
         let url = resumeURL(item.key)
+        // 网络影片只在 Wi-Fi 下截取（停止位置附近通常已在缓存中）
+        let source = item.isRemote ? remoteSource(for: item, prefetching: false) : nil
+        if item.isRemote, source == nil || !network.onWiFi {
+            failedResume.insert(item.key)
+            return updateResumeImage()
+        }
         pendingResume.insert(item.key)
         Task {
             let image = await Task.detached(priority: .utility) {
+                if let source {
+                    defer { source.close() }
+                    return try? Thumbnailer.frame(source: source, at: progress.position, maxWidth: 960)
+                }
                 // 「最近打开」的外部文件需要访问授权
                 let scoped = item.url.startAccessingSecurityScopedResource()
                 defer { if scoped { item.url.stopAccessingSecurityScopedResource() } }
@@ -282,18 +375,30 @@ final class Library {
         try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
     }
 
-    /// 删除已不在片库中的影片的封面与播放进度（文件被删除、移走或从列表移除）
+    /// 删除已不在片库中的影片的封面与播放进度（文件被删除、移走或从列表移除）。
+    /// 网络影片的封面与进度按服务器保存（浏览过的影片不一定在片库中），服务器删除后才清理
     private func removeOrphans() {
         let items = recent + local
         let keys = Set(items.map(\.key))
         let names = Set(keys.map(Self.hash))
+        let servers = Set(network.servers.map(\.id.uuidString))
         let files = (try? FileManager.default.contentsOfDirectory(at: cache, includingPropertiesForKeys: nil)) ?? []
-        // 文件名为「哈希.jpg」「哈希.json」「哈希.resume.jpg」
-        for file in files where !names.contains(String(file.lastPathComponent.prefix { $0 != "." })) {
-            try? FileManager.default.removeItem(at: file)
+        for file in files {
+            if file.hasDirectoryPath || UUID(uuidString: file.lastPathComponent) != nil {
+                // 服务器目录
+                if !servers.contains(file.lastPathComponent) { try? FileManager.default.removeItem(at: file) }
+                continue
+            }
+            // 文件名为「哈希.jpg」「哈希.json」「哈希.resume.jpg」
+            if !names.contains(String(file.lastPathComponent.prefix { $0 != "." })) {
+                try? FileManager.default.removeItem(at: file)
+            }
         }
-        for key in details.keys where !keys.contains(key) { details[key] = nil }
-        let stale = progress.keys.filter { !keys.contains($0) }
+        func kept(_ key: String) -> Bool {
+            keys.contains(key) || Self.server(ofKey: key).map { servers.contains($0) } ?? false
+        }
+        for key in details.keys where !kept(key) { details[key] = nil }
+        let stale = progress.keys.filter { !kept($0) }
         if !stale.isEmpty {
             for key in stale { progress[key] = nil }
             saveProgress()
@@ -301,15 +406,34 @@ final class Library {
     }
 
     private func cacheURL(_ key: String) -> URL {
-        cache.appending(path: Self.hash(key))
+        if let server = Self.server(ofKey: key) {
+            return cache.appending(path: server).appending(path: Self.hash(key))
+        }
+        return cache.appending(path: Self.hash(key))
+    }
+
+    /// 网络影片标识中的服务器 ID
+    nonisolated private static func server(ofKey key: String) -> String? {
+        guard key.hasPrefix("remote|") else { return nil }
+        return key.split(separator: "|", maxSplits: 2).dropFirst().first.map(String.init)
+    }
+
+    /// 网络影片的片源，读取经由块缓存；服务器已删除时为 nil
+    /// prefetching 为 false 时只下载读取需要的部分（截图）
+    func remoteSource(for item: Item, prefetching: Bool = true) -> RemoteByteSource? {
+        guard let server = item.server, let version = item.version, let client = network.client(for: server),
+              let cache = network.cache(server: server, key: item.key, size: item.size, version: version) else { return nil }
+        let source = RemoteByteSource(cache: cache, transport: client.transport(for: item.url))
+        source.setPrefetching(prefetching)
+        return source
     }
 
     /// 截图规则变化时递增，旧缓存随之失效
     nonisolated private static let cacheVersion = 2
 
     /// 截取封面并写入缓存；读取失败时返回 nil 且不写缓存，下次刷新时重试
-    nonisolated private static func generate(_ url: URL, base: URL) -> Details? {
-        guard let result = try? Thumbnailer.make(url: url, maxWidth: 960) else { return nil }
+    nonisolated private static func generate(base: URL, _ make: () throws -> Thumbnailer.Result) -> Details? {
+        guard let result = try? make() else { return nil }
         var hasImage = false
         if let image = result.image, let jpeg = UIImage(cgImage: image).jpegData(compressionQuality: 0.8) {
             hasImage = (try? jpeg.write(to: base.appendingPathExtension("jpg"))) != nil
@@ -353,7 +477,7 @@ final class Library {
         return tags
     }
 
-    nonisolated private static func hash(_ key: String) -> String {
+    nonisolated static func hash(_ key: String) -> String {
         SHA256.hash(data: Data("\(cacheVersion)|\(key)".utf8)).prefix(16).map { String(format: "%02x", $0) }.joined()
     }
 
@@ -363,8 +487,20 @@ final class Library {
         url.standardizedFileURL.path.hasPrefix(documents.standardizedFileURL.path + "/")
     }
 
-    private func storedBookmarks() -> [Data] {
-        UserDefaults.standard.array(forKey: Self.recentKey) as? [Data] ?? []
+    private func storedRecents() -> [Recent] {
+        if let data = UserDefaults.standard.data(forKey: Self.recentKey),
+           let records = try? JSONDecoder().decode([Recent].self, from: data) {
+            return records
+        }
+        // 从旧版的书签列表迁移
+        return (UserDefaults.standard.array(forKey: Self.legacyRecentKey) as? [Data] ?? []).map(Recent.file)
+    }
+
+    private func storeRecents(_ records: [Recent]) {
+        if let data = try? JSONEncoder().encode(Array(records.prefix(Self.recentLimit))) {
+            UserDefaults.standard.set(data, forKey: Self.recentKey)
+            UserDefaults.standard.removeObject(forKey: Self.legacyRecentKey)
+        }
     }
 
     private static func isVideo(_ url: URL) -> Bool {

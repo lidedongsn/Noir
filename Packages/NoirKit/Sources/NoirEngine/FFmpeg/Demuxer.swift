@@ -27,6 +27,10 @@ final class Demuxer {
         avformat_close_input(&context)
     }
 
+    var source: ByteSource { io.source }
+    /// 片源中下一次读取的位置
+    var readPosition: Int64 { io.position }
+
     func stream(_ index: Int) -> UnsafeMutablePointer<AVStream> {
         context!.pointee.streams[index]!
     }

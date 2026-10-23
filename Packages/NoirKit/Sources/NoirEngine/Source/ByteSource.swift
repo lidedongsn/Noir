@@ -6,6 +6,18 @@ public protocol ByteSource: AnyObject, Sendable {
     var size: Int64? { get }
     /// 从 offset 处读取，返回实际读到的字节数，0 表示已到末尾
     func read(at offset: Int64, into buffer: UnsafeMutableRawBufferPointer) throws -> Int
+    /// 从 offset 起可立即读取（不必等待网络）的连续字节数；本地片源为 nil，表示无需缓冲
+    func availableBytes(from offset: Int64) -> Int64?
+    /// 有新数据可读时的回调，在任意线程调用
+    func setDataHandler(_ handler: (@Sendable () -> Void)?)
+    /// 即将从 offset 读取：网络片源从这里开始下载与预缓存
+    func prepare(from offset: Int64)
+}
+
+extension ByteSource {
+    public func availableBytes(from offset: Int64) -> Int64? { nil }
+    public func prepare(from offset: Int64) {}
+    public func setDataHandler(_ handler: (@Sendable () -> Void)?) {}
 }
 
 /// 本地文件数据源，基于 pread，线程安全。

@@ -20,7 +20,11 @@ enum SubtitleText {
 
     /// 读取外挂字幕文件
     static func load(url: URL, info: SubtitleTrackInfo) throws -> SubtitleTrack {
-        let data = try Data(contentsOf: url)
+        try load(data: try Data(contentsOf: url), url: url, info: info)
+    }
+
+    /// 解析已读取的字幕文件内容；url 用于判断格式与报错时显示文件名
+    static func load(data: Data, url: URL, info: SubtitleTrackInfo) throws -> SubtitleTrack {
         guard let text = decode(data) else { throw LoadError.unreadable(url.lastPathComponent) }
         let isSRT = url.pathExtension.lowercased() == "srt"
         let script = isSRT ? ASSScript.plainText : ASSScript(header: text)

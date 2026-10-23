@@ -66,6 +66,10 @@ final class PlaybackSession: @unchecked Sendable {
     /// 已读到的最后一个音频包的时间戳；读取位置回退后，不晚于 audioSkipThrough 的音频包已处理过，丢弃
     private var lastReadAudioPTS: Int64?             // queue
     private var audioSkipThrough: Int64?             // queue
+    /// 网络片源数据不足，暂停时钟等待缓冲
+    private var starved = false                      // queue
+    /// 片源平均码率（字节/秒），用于换算缓冲时长
+    private var bytesPerSecond: Double = 0           // queue
     /// 是否在解码画面；否时只读取音频与字幕，视频数据包直接丢弃
     private var videoActive: Bool { !videoInvalidated && !videoSuspended } // queue
     private var timeObserver: Any?
@@ -167,6 +171,7 @@ final class PlaybackSession: @unchecked Sendable {
             self.timeObserver = nil
         }
         queue.sync {
+            demuxer?.source.setDataHandler(nil)
             stopFeeding()
             synchronizer.setRate(0, time: .zero)
             videoRenderer.flush()
@@ -185,6 +190,15 @@ final class PlaybackSession: @unchecked Sendable {
         let demuxer = try Demuxer(source: source)
         self.demuxer = demuxer
         let info = demuxer.info
+        if let size = source.size, let duration = info.duration, duration > 0 {
+            bytesPerSecond = Double(size) / duration
+        } else {
+            bytesPerSecond = info.bitRate > 0 ? Double(info.bitRate) / 8 : 2_000_000
+        }
+        source.setDataHandler { [weak self] in
+            guard let self else { return }
+            self.queue.async { [weak self] in self?.sourceDataArrived() }
+        }
 
         // 视频：选择第一条系统可解码的轨道
         // 杜比视界优先按杜比视界解码，系统不支持时回退为兼容层
@@ -274,8 +288,8 @@ final class PlaybackSession: @unchecked Sendable {
 
     private func setRate(_ rate: Float) {
         desiredRate = rate
-        // 预缓冲期间仅记录目标速率，起播时生效
-        guard !awaitingPreroll else { return }
+        // 预缓冲、网络缓冲期间仅记录目标速率，起播时生效
+        guard !awaitingPreroll, !starved else { return }
         synchronizer.rate = rate
     }
 
@@ -347,6 +361,7 @@ final class PlaybackSession: @unchecked Sendable {
         target = time
         endOfStream = false
         videoDrained = false
+        starved = false
         awaitingPreroll = true
         videoPrimed = video == nil || !videoActive
         audioPrimed = audio == nil
@@ -387,6 +402,8 @@ final class PlaybackSession: @unchecked Sendable {
         while videoRenderer.isReadyForMoreMediaData {
             while !videoDrained, video.decoder.bufferedCount() <= video.decoder.reorderDepth + Self.decodeAhead {
                 guard let packet = nextPacket(stream: video.index) else {
+                    // 网络缓冲中：等数据到达后继续，不是读完
+                    if starved { return }
                     video.decoder.finish()
                     videoDrained = true
                     break
@@ -446,6 +463,7 @@ final class PlaybackSession: @unchecked Sendable {
                 continue
             }
             guard let packet = nextPacket(stream: audio.index) else {
+                if starved { return }
                 audioRenderer.stopRequestingMediaData()
                 break
             }
@@ -483,6 +501,11 @@ final class PlaybackSession: @unchecked Sendable {
             if index == video?.index, let packet = videoPackets.pop() { return packet }
             if index == audio?.index, let packet = audioPackets.pop() { return packet }
             guard !endOfStream, let demuxer else { return nil }
+            // 网络片源先确认数据已缓存，读取时不阻塞播放队列
+            if !hasData(seconds: 1) {
+                enterStarved()
+                return nil
+            }
             do {
                 guard let packet = try demuxer.readPacket() else {
                     endOfStream = true
@@ -506,6 +529,38 @@ final class PlaybackSession: @unchecked Sendable {
         }
     }
 
+    // MARK: - 网络缓冲
+
+    /// 从当前读取位置往后，是否已缓存约 seconds 秒的数据（本地片源总是）
+    private func hasData(seconds: Double) -> Bool {
+        guard let demuxer, let available = demuxer.source.availableBytes(from: demuxer.readPosition) else { return true }
+        // 至少 2 MB：单个 4K 视频包可达数百 KB，FFmpeg 也按块读取
+        return available >= max(Int64(bytesPerSecond * seconds), 2 << 20)
+    }
+
+    /// 数据不足：停止送数据并暂停时钟，音画停在同一位置；让片源从当前读取位置开始下载
+    private func enterStarved() {
+        guard !starved else { return }
+        if let demuxer { demuxer.source.prepare(from: demuxer.readPosition) }
+        starved = true
+        stopFeeding()
+        if !awaitingPreroll { synchronizer.rate = 0 }
+    }
+
+    /// 新数据到达：缓存足够后恢复。起播或跳转时攒约 3 秒，播放中卡住后攒约 5 秒，避免反复卡顿
+    private func sourceDataArrived() {
+        guard starved, hasData(seconds: awaitingPreroll ? 3 : 5) else { return }
+        starved = false
+        if !awaitingPreroll {
+            // 与预缓冲相同：渲染器重新攒够数据后从当前位置继续
+            awaitingPreroll = true
+            target = synchronizer.currentTime()
+            videoPrimed = video == nil || !videoActive
+            audioPrimed = audio == nil
+        }
+        startFeeding()
+    }
+
     private func startIfPrimed() {
         guard awaitingPreroll, videoPrimed, audioPrimed else { return }
         awaitingPreroll = false
@@ -527,6 +582,10 @@ final class PlaybackSession: @unchecked Sendable {
         stats.outputChannels = audio?.decoder.outputChannels
         stats.audioRoute = audio?.decoder.route
         stats.lastError = lastError
+        stats.buffering = starved
+        if let demuxer, let available = demuxer.source.availableBytes(from: demuxer.readPosition), bytesPerSecond > 0 {
+            stats.cachedAhead = available == .max ? .infinity : Double(available) / bytesPerSecond
+        }
 
         let lastPTS = [lastVideoPTS, lastAudioPTS].filter(\.isValid).max()
         let finished = endOfStream && videoPackets.isEmpty && audioPackets.isEmpty && audioSamples.isEmpty
