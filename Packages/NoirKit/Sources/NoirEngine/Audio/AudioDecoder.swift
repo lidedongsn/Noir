@@ -54,6 +54,8 @@ final class SystemAudioPassthrough: AudioDecoder {
     let outputChannels: Int
     private let format: CMAudioFormatDescription
     private let timeBase: AVRational
+    private let sampleRate: Double
+    private var timeline = AudioTimeline()
 
     init(par: UnsafePointer<AVCodecParameters>, timeBase: AVRational) throws {
         let p = par.pointee
@@ -70,18 +72,47 @@ final class SystemAudioPassthrough: AudioDecoder {
         )
         format = try ChannelLayout.formatDescription(asbd, layout: p.ch_layout)
         outputChannels = Int(p.ch_layout.nb_channels)
+        sampleRate = Double(p.sample_rate)
         self.timeBase = timeBase
     }
 
     func decode(_ packet: Packet) throws -> [CMSampleBuffer] {
         let block = try SampleBuffers.blockBuffer(referencing: packet)
         return [try SampleBuffers.audio(
-            block: block, format: format, frameCount: 1536,
-            packetSizes: [packet.size], pts: timeBase.time(packet.pts)
+            block: block, format: format, frameCount: 1536, packetSizes: [packet.size],
+            pts: timeline.place(timeBase.time(packet.pts), frames: 1536, sampleRate: sampleRate)
         )]
     }
 
-    func flush() {}
+    func flush() {
+        timeline.reset()
+    }
+}
+
+// MARK: - 时间戳连续化
+
+/// 让相邻音频首尾相接。容器时间戳精度有限（MKV 为毫秒），DTS、TrueHD 等帧长不是整毫秒，
+/// 直接使用会在相邻音频之间留下零点几毫秒的空隙或重叠，播放时表现为呲啦声与电流声。
+/// 因此按样本数顺延时间戳，只有与容器时间戳相差超过 tolerance（跳转、丢包）时才重新对齐。
+struct AudioTimeline {
+    private var next: CMTime?
+    private static let tolerance = 0.02
+
+    /// 返回这段音频应使用的时间戳
+    mutating func place(_ pts: CMTime, frames: Int, sampleRate: Double) -> CMTime {
+        let rate = CMTimeScale(sampleRate.rounded())
+        var start = pts.isValid ? pts.convertScale(rate, method: .roundHalfAwayFromZero) : pts
+        if let next, !pts.isValid || abs((pts - next).seconds) < Self.tolerance {
+            start = next
+        }
+        next = start.isValid ? start + CMTime(value: CMTimeValue(frames), timescale: rate) : nil
+        return start
+    }
+
+    /// 跳转或清空解码器后重新对齐
+    mutating func reset() {
+        next = nil
+    }
 }
 
 // MARK: - PCM 直通
@@ -92,6 +123,8 @@ final class PCMPassthrough: AudioDecoder {
     private let format: CMAudioFormatDescription
     private let bytesPerFrame: Int
     private let timeBase: AVRational
+    private let sampleRate: Double
+    private var timeline = AudioTimeline()
 
     init(par: UnsafePointer<AVCodecParameters>, timeBase: AVRational) throws {
         let p = par.pointee
@@ -116,18 +149,22 @@ final class PCMPassthrough: AudioDecoder {
         )
         format = try ChannelLayout.formatDescription(asbd, layout: p.ch_layout)
         outputChannels = channels
+        sampleRate = Double(p.sample_rate)
         self.timeBase = timeBase
     }
 
     func decode(_ packet: Packet) throws -> [CMSampleBuffer] {
         let block = try SampleBuffers.blockBuffer(referencing: packet)
+        let frames = packet.size / bytesPerFrame
         return [try SampleBuffers.audio(
-            block: block, format: format, frameCount: packet.size / bytesPerFrame,
-            pts: timeBase.time(packet.pts)
+            block: block, format: format, frameCount: frames,
+            pts: timeline.place(timeBase.time(packet.pts), frames: frames, sampleRate: sampleRate)
         )]
     }
 
-    func flush() {}
+    func flush() {
+        timeline.reset()
+    }
 }
 
 // MARK: - 采样格式转换

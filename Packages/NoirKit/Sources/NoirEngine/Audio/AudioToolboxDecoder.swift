@@ -10,6 +10,7 @@ final class AudioToolboxDecoder: AudioDecoder {
     private let format: CMAudioFormatDescription
     private let timeBase: AVRational
     private let sampleRate: Double
+    private var timeline = AudioTimeline()
 
     // 输入回调状态：待送入的数据包及其包描述（须在回调返回后保持有效）
     private var pending: Packet?
@@ -136,7 +137,7 @@ final class AudioToolboxDecoder: AudioDecoder {
                 let pts = basePTS + CMTime(value: decodedFrames, timescale: CMTimeScale(sampleRate))
                 samples.append(try SampleBuffers.audio(
                     block: try SampleBuffers.blockBuffer(copying: bytes),
-                    format: format, frameCount: Int(frames), pts: pts
+                    format: format, frameCount: Int(frames), pts: timeline.place(pts, frames: Int(frames), sampleRate: sampleRate)
                 ))
                 decodedFrames += Int64(frames)
             }
@@ -149,6 +150,7 @@ final class AudioToolboxDecoder: AudioDecoder {
 
     func flush() {
         if let converter { AudioConverterReset(converter) }
+        timeline.reset()
         pending = nil
         inFlight = nil
     }

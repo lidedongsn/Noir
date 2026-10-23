@@ -12,6 +12,7 @@ final class FFmpegAudioDecoder: AudioDecoder {
     private var format: CMAudioFormatDescription?
     private var formatKey: (rate: Int32, channels: Int32) = (0, 0)
     private var scratch: [Float] = []
+    private var timeline = AudioTimeline()
 
     init(stream: UnsafeMutablePointer<AVStream>) throws {
         let par = stream.pointee.codecpar!
@@ -47,6 +48,7 @@ final class FFmpegAudioDecoder: AudioDecoder {
 
     func flush() {
         avcodec_flush_buffers(context)
+        timeline.reset()
     }
 
     private func makeSample() throws -> CMSampleBuffer {
@@ -67,7 +69,8 @@ final class FFmpegAudioDecoder: AudioDecoder {
         let block = try scratch.withUnsafeBytes { try SampleBuffers.blockBuffer(copying: $0) }
         let ts = f.best_effort_timestamp != AVConst.noPTS ? f.best_effort_timestamp : f.pts
         return try SampleBuffers.audio(
-            block: block, format: format!, frameCount: Int(f.nb_samples), pts: timeBase.time(ts)
+            block: block, format: format!, frameCount: Int(f.nb_samples),
+            pts: timeline.place(timeBase.time(ts), frames: Int(f.nb_samples), sampleRate: Double(f.sample_rate))
         )
     }
 }
